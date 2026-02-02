@@ -4,6 +4,7 @@ set -e
 REPO="denyzhirkov/tsk"
 INSTALL_DIR="$HOME/.local/bin"
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+COMPLETIONS_URL="https://raw.githubusercontent.com/${REPO}/master/completions"
 
 # Detect OS
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -32,14 +33,18 @@ echo "Installing tsk (${OS}/${ARCH})..."
 mkdir -p "$INSTALL_DIR"
 
 # Download binary
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$LATEST_URL" -o "$INSTALL_DIR/tsk"
-elif command -v wget >/dev/null 2>&1; then
-    wget -q "$LATEST_URL" -O "$INSTALL_DIR/tsk"
-else
-    echo "Error: curl or wget required"
-    exit 1
-fi
+download() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$1" -O "$2"
+    else
+        echo "Error: curl or wget required"
+        exit 1
+    fi
+}
+
+download "$LATEST_URL" "$INSTALL_DIR/tsk"
 
 # Make executable
 chmod +x "$INSTALL_DIR/tsk"
@@ -60,6 +65,28 @@ add_to_path() {
     return 1
 }
 
+# Install shell completions
+install_completions() {
+    local shell="$1"
+    local rc_file="$2"
+    local comp_dir="$HOME/.local/share/tsk/completions"
+
+    mkdir -p "$comp_dir"
+
+    if download "${COMPLETIONS_URL}/tsk.${shell}" "$comp_dir/tsk.${shell}" 2>/dev/null; then
+        local source_line="source $comp_dir/tsk.${shell}"
+        if [ -f "$rc_file" ] && ! grep -q "tsk.${shell}" "$rc_file" 2>/dev/null; then
+            echo "" >> "$rc_file"
+            echo "# tsk completions" >> "$rc_file"
+            echo "$source_line" >> "$rc_file"
+            echo "Installed $shell completions"
+        fi
+    fi
+}
+
+# Detect current shell
+current_shell=$(basename "$SHELL")
+
 # Check if already in PATH
 case ":$PATH:" in
     *":$INSTALL_DIR:"*)
@@ -68,9 +95,6 @@ case ":$PATH:" in
     *)
         # Try to add to shell config
         added=false
-
-        # Detect current shell
-        current_shell=$(basename "$SHELL")
 
         if [ "$current_shell" = "zsh" ]; then
             add_to_path "$HOME/.zshrc" && added=true
@@ -95,5 +119,17 @@ case ":$PATH:" in
         ;;
 esac
 
+# Install completions for current shell
+if [ "$current_shell" = "zsh" ]; then
+    install_completions "zsh" "$HOME/.zshrc"
+elif [ "$current_shell" = "bash" ]; then
+    if [ "$(uname)" = "Darwin" ]; then
+        install_completions "bash" "$HOME/.bash_profile"
+    else
+        install_completions "bash" "$HOME/.bashrc"
+    fi
+fi
+
 echo ""
 echo "Run 'tsk --help' to get started"
+echo "Tab completion enabled (restart terminal to activate)"

@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use rand::Rng;
 use rusqlite::Connection;
 use std::env;
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -80,6 +82,18 @@ Examples:
         /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
     },
+    /// Generate shell completions
+    #[command(after_help = "Examples:
+  tsk completions bash >> ~/.bashrc
+  tsk completions zsh >> ~/.zshrc
+  tsk completions fish > ~/.config/fish/completions/tsk.fish")]
+    Completions {
+        /// Shell type
+        shell: Shell,
+    },
+    /// List task IDs only (for shell completions)
+    #[command(hide = true)]
+    Ids,
 }
 
 fn find_db_path() -> Option<PathBuf> {
@@ -326,6 +340,20 @@ fn cmd_show(conn: &Connection, id: &str) -> Result<()> {
     }
 }
 
+fn cmd_ids(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE done = 0")?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+    for id in ids {
+        println!("{}", id?);
+    }
+    Ok(())
+}
+
+fn cmd_completions(shell: Shell) {
+    generate(shell, &mut Cli::command(), "tsk", &mut io::stdout());
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -333,9 +361,16 @@ fn main() -> Result<()> {
         Some(Commands::Init) => {
             cmd_init()?;
         }
+        Some(Commands::Completions { shell }) => {
+            cmd_completions(shell);
+        }
         Some(cmd) => {
             let db_path = find_db_path();
             let Some(db_path) = db_path else {
+                // For ids command, just return empty if not initialized
+                if matches!(cmd, Commands::Ids) {
+                    return Ok(());
+                }
                 bail!("Project not initialized. Run 'tsk init' first.");
             };
 
@@ -344,6 +379,7 @@ fn main() -> Result<()> {
 
             match cmd {
                 Commands::Init => unreachable!(),
+                Commands::Completions { .. } => unreachable!(),
                 Commands::Create {
                     title,
                     description,
@@ -366,6 +402,9 @@ fn main() -> Result<()> {
                 }
                 Commands::Show { id } => {
                     cmd_show(&conn, &id)?;
+                }
+                Commands::Ids => {
+                    cmd_ids(&conn)?;
                 }
             }
         }

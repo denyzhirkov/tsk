@@ -71,3 +71,18 @@ xyz789  [x]  Validation ^abc123 @def456
 
 - `^id` — parent task
 - `@id` — dependency
+
+## Tab completion
+
+Tab completion is installed automatically. Restart terminal after install.
+
+Manual setup:
+```bash
+# zsh
+source <(tsk completions zsh)
+
+# bash
+source <(tsk completions bash)
+```
+
+Supports completing task IDs: `tsk show [TAB]`
