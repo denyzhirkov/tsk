@@ -3,6 +3,7 @@ set -e
 
 REPO="denyzhirkov/tsk"
 INSTALL_DIR="$HOME/.local/bin"
+PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 
 # Detect OS
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -45,13 +46,52 @@ chmod +x "$INSTALL_DIR/tsk"
 
 echo "Installed to $INSTALL_DIR/tsk"
 
-# Check PATH
+# Add to PATH if needed
+add_to_path() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        if ! grep -q '.local/bin' "$file" 2>/dev/null; then
+            echo "" >> "$file"
+            echo "$PATH_LINE" >> "$file"
+            echo "Added to PATH in $file"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Check if already in PATH
 case ":$PATH:" in
-    *":$INSTALL_DIR:"*) ;;
+    *":$INSTALL_DIR:"*)
+        echo "PATH already configured"
+        ;;
     *)
-        echo ""
-        echo "Add to your shell config:"
-        echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        # Try to add to shell config
+        added=false
+
+        # Detect current shell
+        current_shell=$(basename "$SHELL")
+
+        if [ "$current_shell" = "zsh" ]; then
+            add_to_path "$HOME/.zshrc" && added=true
+        elif [ "$current_shell" = "bash" ]; then
+            if [ "$(uname)" = "Darwin" ]; then
+                add_to_path "$HOME/.bash_profile" && added=true
+            else
+                add_to_path "$HOME/.bashrc" && added=true
+            fi
+        fi
+
+        # Fallback to .profile
+        if [ "$added" = false ]; then
+            add_to_path "$HOME/.profile" && added=true
+        fi
+
+        if [ "$added" = true ]; then
+            echo "Restart your terminal or run: source ~/.${current_shell}rc"
+        else
+            echo "Add manually: $PATH_LINE"
+        fi
         ;;
 esac
 
