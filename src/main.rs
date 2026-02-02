@@ -83,10 +83,7 @@ Examples:
         id: String,
     },
     /// Generate shell completions
-    #[command(after_help = "Examples:
-  tsk completions bash >> ~/.bashrc
-  tsk completions zsh >> ~/.zshrc
-  tsk completions fish > ~/.config/fish/completions/tsk.fish")]
+    #[command(hide = true)]
     Completions {
         /// Shell type
         shell: Shell,
