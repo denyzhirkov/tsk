@@ -103,15 +103,31 @@ fn find_db_path() -> Option<PathBuf> {
     }
 }
 
-fn generate_id() -> String {
+fn generate_id(conn: &Connection) -> Result<String> {
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::thread_rng();
-    (0..6)
-        .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
+
+    for _ in 0..100 {
+        let id: String = (0..6)
+            .map(|_| {
+                let idx = rng.gen_range(0..CHARSET.len());
+                CHARSET[idx] as char
+            })
+            .collect();
+
+        if !task_exists(conn, &id)? {
+            return Ok(id);
+        }
+    }
+
+    bail!("Failed to generate unique ID after 100 attempts");
+}
+
+fn validate_id(id: &str) -> Result<()> {
+    if id.len() != 6 || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        bail!("Invalid task ID '{}'. Must be 6 characters [a-z0-9].", id);
+    }
+    Ok(())
 }
 
 fn init_db(conn: &Connection) -> Result<()> {
@@ -131,13 +147,17 @@ fn init_db(conn: &Connection) -> Result<()> {
 }
 
 fn migrate_db(conn: &Connection) -> Result<()> {
-    // Check if parent_id column exists
-    let has_parent: bool = conn
-        .prepare("SELECT parent_id FROM tasks LIMIT 1")
-        .is_ok();
+    // Check columns using PRAGMA
+    let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
 
-    if !has_parent {
+    if !columns.contains(&"parent_id".to_string()) {
         conn.execute("ALTER TABLE tasks ADD COLUMN parent_id TEXT", [])?;
+    }
+    if !columns.contains(&"depend_id".to_string()) {
         conn.execute("ALTER TABLE tasks ADD COLUMN depend_id TEXT", [])?;
     }
 
@@ -153,13 +173,18 @@ fn task_exists(conn: &Connection, id: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-fn task_is_done(conn: &Connection, id: &str) -> Result<bool> {
-    let done: i32 = conn.query_row(
+fn task_is_done(conn: &Connection, id: &str) -> Result<Option<bool>> {
+    let result = conn.query_row(
         "SELECT done FROM tasks WHERE id = ?1",
         [id],
-        |row| row.get(0),
-    )?;
-    Ok(done == 1)
+        |row| row.get::<_, i32>(0),
+    );
+
+    match result {
+        Ok(done) => Ok(Some(done == 1)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn cmd_init() -> Result<()> {
@@ -190,6 +215,7 @@ fn cmd_create(
 ) -> Result<()> {
     // Validate parent exists
     if let Some(parent_id) = parent {
+        validate_id(parent_id)?;
         if !task_exists(conn, parent_id)? {
             bail!("Parent task '{}' not found.", parent_id);
         }
@@ -197,12 +223,13 @@ fn cmd_create(
 
     // Validate dependency exists
     if let Some(depend_id) = depend {
+        validate_id(depend_id)?;
         if !task_exists(conn, depend_id)? {
             bail!("Dependency task '{}' not found.", depend_id);
         }
     }
 
-    let id = generate_id();
+    let id = generate_id(conn)?;
     conn.execute(
         "INSERT INTO tasks (id, title, description, parent_id, depend_id) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![id, title, description, parent, depend],
@@ -248,6 +275,8 @@ fn cmd_list(conn: &Connection, all: bool) -> Result<()> {
 }
 
 fn cmd_update(conn: &Connection, id: &str, description: &str) -> Result<()> {
+    validate_id(id)?;
+
     let updated = conn.execute(
         "UPDATE tasks SET description = ?1 WHERE id = ?2",
         [description, id],
@@ -262,6 +291,8 @@ fn cmd_update(conn: &Connection, id: &str, description: &str) -> Result<()> {
 }
 
 fn cmd_done(conn: &Connection, id: &str) -> Result<()> {
+    validate_id(id)?;
+
     // Check if task exists
     if !task_exists(conn, id)? {
         bail!("Task '{}' not found.", id);
@@ -275,8 +306,10 @@ fn cmd_done(conn: &Connection, id: &str) -> Result<()> {
     )?;
 
     if let Some(did) = depend_id {
-        if !task_is_done(conn, &did)? {
-            bail!("Cannot complete: depends on '{}' which is not done.", did);
+        match task_is_done(conn, &did)? {
+            Some(true) => {} // dependency is done, OK
+            Some(false) => bail!("Cannot complete: depends on '{}' which is not done.", did),
+            None => {} // dependency was deleted, allow completion
         }
     }
 
@@ -286,17 +319,42 @@ fn cmd_done(conn: &Connection, id: &str) -> Result<()> {
 }
 
 fn cmd_remove(conn: &Connection, id: &str) -> Result<()> {
-    let deleted = conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+    validate_id(id)?;
 
-    if deleted == 0 {
+    if !task_exists(conn, id)? {
         bail!("Task '{}' not found.", id);
     }
 
+    // Check if other tasks depend on this one
+    let dependents: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE depend_id = ?1 AND done = 0",
+        [id],
+        |row| row.get(0),
+    )?;
+
+    if dependents > 0 {
+        bail!("Cannot remove: {} active task(s) depend on '{}'.", dependents, id);
+    }
+
+    // Check if this task has children
+    let children: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE parent_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+
+    if children > 0 {
+        bail!("Cannot remove: {} task(s) have '{}' as parent.", children, id);
+    }
+
+    conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
     println!("Removed: {}", id);
     Ok(())
 }
 
 fn cmd_show(conn: &Connection, id: &str) -> Result<()> {
+    validate_id(id)?;
+
     let result = conn.query_row(
         "SELECT id, title, description, done, parent_id, depend_id, created_at FROM tasks WHERE id = ?1",
         [id],
