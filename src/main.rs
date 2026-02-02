@@ -8,6 +8,13 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "tsk")]
 #[command(about = "Agent-first cli task tracker")]
+#[command(after_help = "Task ID is a 6-character code (e.g., a1b2c3) shown after create and in list output.
+
+Example:
+  tsk init
+  tsk create \"Fix bug\" \"Fix login validation\"  # Created: a1b2c3
+  tsk show a1b2c3
+  tsk done a1b2c3")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -15,49 +22,62 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize tsk in current directory
+    /// Initialize tsk in current directory (creates .tsk/)
     Init,
     /// Create a new task
-    #[command(after_help = "Output symbols:\n  ^id  parent task\n  @id  dependency")]
+    #[command(after_help = "Examples:
+  tsk create \"Fix bug\" \"Fix login validation\"
+  tsk create \"Subtask\" \"Details\" --parent a1b2c3
+  tsk create \"Task\" \"Details\" --depend x7y8z9
+
+Output symbols in list:
+  ^id  parent task
+  @id  dependency")]
     Create {
-        /// Task title
+        /// Task title (short summary)
         title: String,
-        /// Task description
+        /// Task description (detailed info)
         description: String,
-        /// Parent task ID (for stories/epics)
+        /// Parent task ID for subtasks/stories
         #[arg(long)]
         parent: Option<String>,
-        /// Dependency task ID (blocks completion until done)
+        /// Dependency: this task can't be done until depend task is done
         #[arg(long)]
         depend: Option<String>,
     },
-    /// List tasks
-    #[command(after_help = "Output symbols:\n  ^id  parent task\n  @id  dependency")]
+    /// List tasks (active by default)
+    #[command(after_help = "Output format:
+  <id>  [status]  <title> [^parent] [@depend]
+
+Examples:
+  tsk list        # active tasks only
+  tsk list --all  # include completed")]
     List {
-        /// Show all tasks including completed
+        /// Include completed tasks
         #[arg(long)]
         all: bool,
     },
-    /// Update task description
+    /// Update task description by ID
     Update {
-        /// Task ID
+        /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
-        /// New description
+        /// New description text
         description: String,
     },
-    /// Mark task as done (dependencies must be completed first)
+    /// Mark task as done by ID
+    #[command(after_help = "Note: If task has --depend, the dependency must be completed first.")]
     Done {
-        /// Task ID
+        /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
     },
-    /// Remove a task
+    /// Remove task by ID
     Remove {
-        /// Task ID
+        /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
     },
-    /// Show task details
+    /// Show full task details by ID
     Show {
-        /// Task ID
+        /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
     },
 }
