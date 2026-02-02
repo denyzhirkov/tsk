@@ -235,15 +235,15 @@ This project uses `tsk` for task tracking.
 "#;
 
 fn install_agent_rules(current_dir: &PathBuf, agents: &[usize]) -> Result<()> {
-    let agent_configs: Vec<(&str, PathBuf, bool)> = vec![
-        ("Claude Code", current_dir.join("CLAUDE.md"), true),
-        ("GitHub Copilot", current_dir.join(".github").join("copilot-instructions.md"), false),
-        ("Cursor", current_dir.join(".cursorrules"), true),
-        ("Windsurf", current_dir.join(".windsurfrules"), true),
+    let agent_configs: Vec<(&str, PathBuf)> = vec![
+        ("Claude Code", current_dir.join("CLAUDE.md")),
+        ("GitHub Copilot", current_dir.join(".github").join("copilot-instructions.md")),
+        ("Cursor", current_dir.join(".cursorrules")),
+        ("Windsurf", current_dir.join(".windsurfrules")),
     ];
 
     for &idx in agents {
-        let (name, path, append) = &agent_configs[idx];
+        let (name, path) = &agent_configs[idx];
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
@@ -252,11 +252,11 @@ fn install_agent_rules(current_dir: &PathBuf, agents: &[usize]) -> Result<()> {
             }
         }
 
-        if *append && path.exists() {
+        if path.exists() {
             // Append to existing file
             let existing = fs::read_to_string(&path)?;
             if !existing.contains("## Task Management") {
-                let new_content = format!("{}\n{}", existing.trim_end(), TSK_INSTRUCTIONS);
+                let new_content = format!("{}\n\n{}", existing.trim_end(), TSK_INSTRUCTIONS);
                 fs::write(&path, new_content)?;
                 println!("  Updated: {}", path.display());
             } else {
