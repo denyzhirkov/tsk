@@ -1,0 +1,7 @@
+/target
+/dist
+.tsk
+.DS_Store
+
+*.sqlite
+.claude

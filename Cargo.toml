@@ -1,0 +1,11 @@
+[package]
+name = "tsk"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-first cli task tracker"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+rand = "0.8"
