@@ -25,6 +25,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize tsk in current directory (creates .tsk/)
+    #[command(after_help = "Creates .tsk/ directory with tsk.sqlite database.
+Run this once per project before using other commands.")]
     Init,
     /// Create a new task [--parent <id>] [--depend <id>]
     #[command(after_help = "Examples:
@@ -64,6 +66,8 @@ Examples:
         parent: Option<String>,
     },
     /// Update task description by ID
+    #[command(after_help = "Example:
+  tsk update a1b2c3 \"New detailed description\"")]
     Update {
         /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
@@ -77,11 +81,15 @@ Examples:
         id: String,
     },
     /// Remove task by ID
+    #[command(after_help = "Cannot remove tasks that:
+  - Have child tasks (--parent references this task)
+  - Have active dependents (--depend references this task)")]
     Remove {
         /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
     },
     /// Show full task details by ID
+    #[command(after_help = "Displays: ID, title, status, parent, dependency, created date, and full description.")]
     Show {
         /// Task ID (6 chars, e.g., a1b2c3)
         id: String,
