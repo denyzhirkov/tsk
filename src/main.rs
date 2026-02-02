@@ -207,7 +207,7 @@ fn cmd_create(
         "INSERT INTO tasks (id, title, description, parent_id, depend_id) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![id, title, description, parent, depend],
     )?;
-    println!("Created: {}", id);
+    println!("{}", id);
     Ok(())
 }
 
