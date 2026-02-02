@@ -24,7 +24,7 @@ struct Cli {
 enum Commands {
     /// Initialize tsk in current directory (creates .tsk/)
     Init,
-    /// Create a new task
+    /// Create a new task [--parent <id>] [--depend <id>]
     #[command(after_help = "Examples:
   tsk create \"Fix bug\" \"Fix login validation\"
   tsk create \"Subtask\" \"Details\" --parent a1b2c3
