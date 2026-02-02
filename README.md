@@ -24,7 +24,8 @@ This creates `.tsk/tsk.sqlite` in the current directory.
 
 | Command | Description |
 |---------|-------------|
-| `tsk init` | Initialize tsk in current directory |
+| `tsk init` | Initialize tsk (interactive agent rules setup) |
+| `tsk init --rules <agents>` | Initialize with agent rules (claude,copilot,cursor,windsurf,all) |
 | `tsk create <title> <description> [--parent <id>] [--depend <id>]` | Create a new task |
 | `tsk list` | List active tasks |
 | `tsk list --all` | List all tasks including completed |
@@ -77,6 +78,21 @@ xyz789  [x]  Validation ^abc123 @def456
 
 - `^id` — parent task
 - `@id` — dependency
+
+## AI Agent Integration
+
+Install rules for AI coding assistants:
+
+```bash
+tsk init --rules all                 # all agents
+tsk init --rules claude,copilot      # specific agents
+```
+
+Supported agents:
+- **Claude Code** → `CLAUDE.md`
+- **GitHub Copilot** → `.github/copilot-instructions.md`
+- **Cursor** → `.cursorrules`
+- **Windsurf** → `.windsurfrules`
 
 ## Tab completion
 

@@ -1,9 +1,11 @@
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
+use dialoguer::MultiSelect;
 use rand::Rng;
 use rusqlite::Connection;
 use std::env;
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 
@@ -26,8 +28,19 @@ struct Cli {
 enum Commands {
     /// Initialize tsk in current directory (creates .tsk/)
     #[command(after_help = "Creates .tsk/ directory with tsk.sqlite database.
-Run this once per project before using other commands.")]
-    Init,
+Run this once per project before using other commands.
+
+Examples:
+  tsk init                           # interactive agent selection
+  tsk init --rules claude,copilot    # non-interactive install
+  tsk init --rules all               # install all agent rules
+
+Available agents: claude, copilot, cursor, windsurf")]
+    Init {
+        /// Install agent rules (comma-separated: claude,copilot,cursor,windsurf,all)
+        #[arg(long)]
+        rules: Option<String>,
+    },
     /// Create a new task [--parent <id>] [--depend <id>]
     #[command(after_help = "Examples:
   tsk create \"Fix bug\" \"Fix login validation\"
@@ -199,22 +212,140 @@ fn task_is_done(conn: &Connection, id: &str) -> Result<Option<bool>> {
     }
 }
 
-fn cmd_init() -> Result<()> {
+const TSK_INSTRUCTIONS: &str = r#"## Task Management
+
+This project uses `tsk` for task tracking.
+
+### Commands
+- `tsk create "<title>" "<description>"` — create task, returns ID
+- `tsk create "<title>" "<desc>" --parent <id>` — create subtask
+- `tsk create "<title>" "<desc>" --depend <id>` — task with dependency
+- `tsk list` — show active tasks
+- `tsk list --parent <id>` — show subtasks only
+- `tsk show <id>` — task details
+- `tsk done <id>` — mark complete
+- `tsk remove <id>` — delete task
+
+### When to use
+- User asks to track/manage tasks
+- Multi-step work requiring progress tracking
+
+### Output format
+`abc123  [ ]  Title ^parent @dependency`
+"#;
+
+fn install_agent_rules(current_dir: &PathBuf, agents: &[usize]) -> Result<()> {
+    let agent_configs: Vec<(&str, PathBuf, bool)> = vec![
+        ("Claude Code", current_dir.join("CLAUDE.md"), true),
+        ("GitHub Copilot", current_dir.join(".github").join("copilot-instructions.md"), false),
+        ("Cursor", current_dir.join(".cursorrules"), true),
+        ("Windsurf", current_dir.join(".windsurfrules"), true),
+    ];
+
+    for &idx in agents {
+        let (name, path, append) = &agent_configs[idx];
+
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        if *append && path.exists() {
+            // Append to existing file
+            let existing = fs::read_to_string(&path)?;
+            if !existing.contains("## Task Management") {
+                let new_content = format!("{}\n{}", existing.trim_end(), TSK_INSTRUCTIONS);
+                fs::write(&path, new_content)?;
+                println!("  Updated: {}", path.display());
+            } else {
+                println!("  Skipped: {} (already has tsk rules)", path.display());
+            }
+        } else {
+            // Create new file
+            fs::write(&path, TSK_INSTRUCTIONS)?;
+            println!("  Created: {}", path.display());
+        }
+
+        let _ = name; // suppress unused warning
+    }
+
+    Ok(())
+}
+
+fn parse_rules_arg(rules: &str) -> Vec<usize> {
+    let mut indices = Vec::new();
+    for part in rules.to_lowercase().split(',') {
+        match part.trim() {
+            "all" => return vec![0, 1, 2, 3],
+            "claude" => indices.push(0),
+            "copilot" => indices.push(1),
+            "cursor" => indices.push(2),
+            "windsurf" => indices.push(3),
+            _ => {}
+        }
+    }
+    indices
+}
+
+fn cmd_init(rules: Option<&str>) -> Result<()> {
     let current_dir = env::current_dir().context("Failed to get current directory")?;
     let tsk_dir = current_dir.join(".tsk");
 
-    if tsk_dir.exists() {
-        println!("Already initialized.");
-        return Ok(());
+    let already_initialized = tsk_dir.exists();
+
+    if !already_initialized {
+        fs::create_dir_all(&tsk_dir).context("Failed to create .tsk directory")?;
+
+        let db_path = tsk_dir.join("tsk.sqlite");
+        let conn = Connection::open(&db_path).context("Failed to create database")?;
+        init_db(&conn)?;
+
+        println!("Initialized tsk in {}", tsk_dir.display());
     }
 
-    std::fs::create_dir_all(&tsk_dir).context("Failed to create .tsk directory")?;
+    // Handle rules installation
+    if let Some(rules_str) = rules {
+        // Non-interactive mode
+        let selected = parse_rules_arg(rules_str);
+        if !selected.is_empty() {
+            if already_initialized {
+                println!("Installing agent rules...");
+            }
+            println!();
+            install_agent_rules(&current_dir, &selected)?;
+            println!();
+            println!("Agent rules installed.");
+        }
+    } else if !already_initialized {
+        // Interactive mode (only for new init)
+        let agents = vec![
+            "Claude Code (CLAUDE.md)",
+            "GitHub Copilot (.github/copilot-instructions.md)",
+            "Cursor (.cursorrules)",
+            "Windsurf (.windsurfrules)",
+        ];
 
-    let db_path = tsk_dir.join("tsk.sqlite");
-    let conn = Connection::open(&db_path).context("Failed to create database")?;
-    init_db(&conn)?;
+        println!();
+        println!("Install AI agent rules? (Space to select, Enter to confirm)");
 
-    println!("Initialized tsk in {}", tsk_dir.display());
+        let selections = MultiSelect::new()
+            .items(&agents)
+            .interact_opt()?;
+
+        if let Some(selected) = selections {
+            if !selected.is_empty() {
+                println!();
+                install_agent_rules(&current_dir, &selected)?;
+                println!();
+                println!("Agent rules installed.");
+            }
+        }
+    } else {
+        println!("Already initialized. Use --rules to add agent rules.");
+    }
+
     Ok(())
 }
 
@@ -446,8 +577,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Init) => {
-            cmd_init()?;
+        Some(Commands::Init { rules }) => {
+            cmd_init(rules.as_deref())?;
         }
         Some(Commands::Completions { shell }) => {
             cmd_completions(shell);
@@ -466,7 +597,7 @@ fn main() -> Result<()> {
             migrate_db(&conn)?;
 
             match cmd {
-                Commands::Init => unreachable!(),
+                Commands::Init { .. } => unreachable!(),
                 Commands::Completions { .. } => unreachable!(),
                 Commands::Create {
                     title,

@@ -10,3 +10,4 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 anyhow = "1"
 rand = "0.8"
+dialoguer = "0.11"
