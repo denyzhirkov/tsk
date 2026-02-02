@@ -52,12 +52,16 @@ Output symbols in list:
   <id>  [status]  <title> [^parent] [@depend]
 
 Examples:
-  tsk list        # active tasks only
-  tsk list --all  # include completed")]
+  tsk list                  # active tasks only
+  tsk list --all            # include completed
+  tsk list --parent abc123  # only children of abc123")]
     List {
         /// Include completed tasks
         #[arg(long)]
         all: bool,
+        /// Filter by parent task ID
+        #[arg(long)]
+        parent: Option<String>,
     },
     /// Update task description by ID
     Update {
@@ -238,15 +242,36 @@ fn cmd_create(
     Ok(())
 }
 
-fn cmd_list(conn: &Connection, all: bool) -> Result<()> {
-    let sql = if all {
-        "SELECT id, title, done, parent_id, depend_id FROM tasks ORDER BY created_at"
-    } else {
-        "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE done = 0 ORDER BY created_at"
+fn cmd_list(conn: &Connection, all: bool, parent: Option<&str>) -> Result<()> {
+    if let Some(pid) = parent {
+        validate_id(pid)?;
+        if !task_exists(conn, pid)? {
+            bail!("Parent task '{}' not found.", pid);
+        }
+    }
+
+    let (sql, params): (&str, Vec<&str>) = match (all, parent) {
+        (true, Some(p)) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE parent_id = ?1 ORDER BY created_at",
+            vec![p],
+        ),
+        (false, Some(p)) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE done = 0 AND parent_id = ?1 ORDER BY created_at",
+            vec![p],
+        ),
+        (true, None) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks ORDER BY created_at",
+            vec![],
+        ),
+        (false, None) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE done = 0 ORDER BY created_at",
+            vec![],
+        ),
     };
 
     let mut stmt = conn.prepare(sql)?;
-    let tasks = stmt.query_map([], |row| {
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+    let tasks = stmt.query_map(params_refs.as_slice(), |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -443,8 +468,8 @@ fn main() -> Result<()> {
                 } => {
                     cmd_create(&conn, &title, &description, parent.as_deref(), depend.as_deref())?;
                 }
-                Commands::List { all } => {
-                    cmd_list(&conn, all)?;
+                Commands::List { all, parent } => {
+                    cmd_list(&conn, all, parent.as_deref())?;
                 }
                 Commands::Update { id, description } => {
                     cmd_update(&conn, &id, &description)?;

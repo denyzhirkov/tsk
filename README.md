@@ -28,6 +28,7 @@ This creates `.tsk/tsk.sqlite` in the current directory.
 | `tsk create <title> <description> [--parent <id>] [--depend <id>]` | Create a new task |
 | `tsk list` | List active tasks |
 | `tsk list --all` | List all tasks including completed |
+| `tsk list --parent <id>` | List children of a task |
 | `tsk show <id>` | Show task details |
 | `tsk update <id> <description>` | Update task description |
 | `tsk done <id>` | Mark task as done |
@@ -53,6 +54,11 @@ tsk create "Validation" "Add validation" --parent abc123 --depend def456
 # List tasks
 tsk list
 # abc123  [ ]  User Auth
+# def456  [ ]  Login form ^abc123
+# xyz789  [ ]  Validation ^abc123 @def456
+
+# List only subtasks of a story
+tsk list --parent abc123
 # def456  [ ]  Login form ^abc123
 # xyz789  [ ]  Validation ^abc123 @def456
 
