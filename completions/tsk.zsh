@@ -57,4 +57,4 @@ _tsk() {
     esac
 }
 
-_tsk "$@"
+compdef _tsk tsk
