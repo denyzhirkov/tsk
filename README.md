@@ -124,13 +124,21 @@ tsk mcp   # starts MCP server on stdio
 
 ### Claude Code
 
-Add to `~/.claude/mcp_servers.json`:
+Add the MCP server using the CLI:
+
+```bash
+claude mcp add --transport stdio --scope user tsk -- tsk mcp
+```
+
+Or add to `.mcp.json` in your project root for team sharing:
 
 ```json
 {
-  "tsk": {
-    "command": "tsk",
-    "args": ["mcp"]
+  "mcpServers": {
+    "tsk": {
+      "command": "tsk",
+      "args": ["mcp"]
+    }
   }
 }
 ```
