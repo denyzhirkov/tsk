@@ -3,6 +3,7 @@ set -e
 
 REPO="denyzhirkov/tsk"
 INSTALL_DIR="$HOME/.local/bin"
+GLOBAL_BIN="/usr/local/bin"
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 COMPLETIONS_URL="https://raw.githubusercontent.com/${REPO}/master/completions"
 
@@ -50,6 +51,24 @@ download "$LATEST_URL" "$INSTALL_DIR/tsk"
 chmod +x "$INSTALL_DIR/tsk"
 
 echo "Installed to $INSTALL_DIR/tsk"
+
+# Create symlink in /usr/local/bin for MCP server compatibility
+# (IDEs like VS Code may not have ~/.local/bin in PATH)
+create_global_symlink() {
+    if [ -d "$GLOBAL_BIN" ]; then
+        if [ -w "$GLOBAL_BIN" ]; then
+            ln -sf "$INSTALL_DIR/tsk" "$GLOBAL_BIN/tsk"
+            echo "Created symlink: $GLOBAL_BIN/tsk"
+        elif command -v sudo >/dev/null 2>&1; then
+            echo "Creating symlink in $GLOBAL_BIN (requires sudo)..."
+            if sudo ln -sf "$INSTALL_DIR/tsk" "$GLOBAL_BIN/tsk"; then
+                echo "Created symlink: $GLOBAL_BIN/tsk"
+            fi
+        fi
+    fi
+}
+
+create_global_symlink
 
 # Add to PATH if needed
 add_to_path() {
