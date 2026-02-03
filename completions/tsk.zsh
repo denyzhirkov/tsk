@@ -14,6 +14,7 @@ _tsk() {
         'list:List tasks'
         'show:Show task details'
         'update:Update task description'
+        'start:Start working on a task'
         'done:Mark task as done'
         'remove:Remove a task'
         'completions:Generate shell completions'
@@ -31,7 +32,7 @@ _tsk() {
             ;;
         args)
             case $words[1] in
-                show|done|remove)
+                show|start|done|remove)
                     _tsk_task_ids
                     ;;
                 update)
@@ -47,7 +48,10 @@ _tsk() {
                         '2:description:'
                     ;;
                 list)
-                    _arguments '--all[Include completed tasks]'
+                    _arguments \
+                        '--inprogress[Show in progress tasks only]' \
+                        '--all[Include all tasks]' \
+                        '--parent=[Filter by parent task ID]:task id:_tsk_task_ids'
                     ;;
                 completions)
                     _arguments '1:shell:(bash zsh fish powershell elvish)'

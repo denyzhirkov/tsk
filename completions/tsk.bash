@@ -2,7 +2,7 @@ _tsk() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="init create list show update done remove completions"
+    local commands="init create list show update start done remove completions"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -12,7 +12,7 @@ _tsk() {
     local cmd="${words[1]}"
 
     case $cmd in
-        show|done|remove)
+        show|start|done|remove)
             if [[ $cword -eq 2 ]]; then
                 local ids=$(tsk ids 2>/dev/null)
                 COMPREPLY=($(compgen -W "$ids" -- "$cur"))
@@ -38,9 +38,17 @@ _tsk() {
             esac
             ;;
         list)
-            if [[ $cur == -* ]]; then
-                COMPREPLY=($(compgen -W "--all" -- "$cur"))
-            fi
+            case $prev in
+                --parent)
+                    local ids=$(tsk ids 2>/dev/null)
+                    COMPREPLY=($(compgen -W "$ids" -- "$cur"))
+                    ;;
+                *)
+                    if [[ $cur == -* ]]; then
+                        COMPREPLY=($(compgen -W "--inprogress --all --parent" -- "$cur"))
+                    fi
+                    ;;
+            esac
             ;;
         completions)
             if [[ $cword -eq 2 ]]; then
