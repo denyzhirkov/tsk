@@ -4,10 +4,83 @@ use clap_complete::{generate, Shell};
 use dialoguer::MultiSelect;
 use rand::Rng;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+
+mod mcp;
+
+/// Task status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
+impl TaskStatus {
+    pub fn from_int(value: i32) -> Self {
+        match value {
+            0 => TaskStatus::Pending,
+            1 => TaskStatus::InProgress,
+            _ => TaskStatus::Done,
+        }
+    }
+
+    pub fn to_int(self) -> i32 {
+        match self {
+            TaskStatus::Pending => 0,
+            TaskStatus::InProgress => 1,
+            TaskStatus::Done => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskStatus::Pending => "pending",
+            TaskStatus::InProgress => "in_progress",
+            TaskStatus::Done => "done",
+        }
+    }
+
+    pub fn marker(self) -> &'static str {
+        match self {
+            TaskStatus::Pending => " ",
+            TaskStatus::InProgress => ">",
+            TaskStatus::Done => "x",
+        }
+    }
+}
+
+/// Task data structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: TaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depend_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// Task summary for list output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub id: String,
+    pub title: String,
+    pub status: TaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depend_id: Option<String>,
+}
 
 #[derive(Parser)]
 #[command(name = "tsk")]
@@ -132,6 +205,9 @@ Task must be in pending status to start.")]
     /// List task IDs only (for shell completions)
     #[command(hide = true)]
     Ids,
+    /// Run MCP server for IDE integration
+    #[command(hide = true)]
+    Mcp,
 }
 
 fn find_db_path() -> Option<PathBuf> {
@@ -259,6 +335,303 @@ fn task_is_done(conn: &Connection, id: &str) -> Result<Option<bool>> {
         Ok(done) => Ok(Some(done == 2)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+// ============================================================================
+// Core functions (return data, used by CLI and MCP)
+// ============================================================================
+
+/// Create a new task and return its ID
+pub fn create_task(
+    conn: &Connection,
+    title: &str,
+    description: &str,
+    parent: Option<&str>,
+    depend: Option<&str>,
+) -> Result<String> {
+    if let Some(parent_id) = parent {
+        validate_id(parent_id)?;
+        if !task_exists(conn, parent_id)? {
+            bail!("Parent task '{}' not found.", parent_id);
+        }
+    }
+
+    if let Some(depend_id) = depend {
+        validate_id(depend_id)?;
+        if !task_exists(conn, depend_id)? {
+            bail!("Dependency task '{}' not found.", depend_id);
+        }
+    }
+
+    let id = generate_id(conn)?;
+    conn.execute(
+        "INSERT INTO tasks (id, title, description, parent_id, depend_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![id, title, description, parent, depend],
+    )?;
+    Ok(id)
+}
+
+/// List tasks with optional filters
+pub fn list_tasks(
+    conn: &Connection,
+    inprogress: bool,
+    all: bool,
+    parent: Option<&str>,
+) -> Result<Vec<TaskSummary>> {
+    if let Some(pid) = parent {
+        validate_id(pid)?;
+        if !task_exists(conn, pid)? {
+            bail!("Parent task '{}' not found.", pid);
+        }
+    }
+
+    let status_filter = if all {
+        None
+    } else if inprogress {
+        Some(1)
+    } else {
+        Some(0)
+    };
+
+    let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (status_filter, parent) {
+        (None, Some(p)) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE parent_id = ?1 ORDER BY created_at".to_string(),
+            vec![Box::new(p.to_string()) as Box<dyn rusqlite::ToSql>],
+        ),
+        (Some(status), Some(p)) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE done = ?1 AND parent_id = ?2 ORDER BY created_at".to_string(),
+            vec![Box::new(status) as Box<dyn rusqlite::ToSql>, Box::new(p.to_string())],
+        ),
+        (None, None) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks ORDER BY created_at".to_string(),
+            vec![],
+        ),
+        (Some(status), None) => (
+            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE done = ?1 ORDER BY created_at".to_string(),
+            vec![Box::new(status) as Box<dyn rusqlite::ToSql>],
+        ),
+    };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i32>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+
+    let mut tasks = Vec::new();
+    for row in rows {
+        let (id, title, done, parent_id, depend_id) = row?;
+        tasks.push(TaskSummary {
+            id,
+            title,
+            status: TaskStatus::from_int(done),
+            parent_id,
+            depend_id,
+        });
+    }
+    Ok(tasks)
+}
+
+/// Get full task details
+pub fn get_task(conn: &Connection, id: &str) -> Result<Task> {
+    validate_id(id)?;
+
+    let result = conn.query_row(
+        "SELECT id, title, description, done, parent_id, depend_id, created_at FROM tasks WHERE id = ?1",
+        [id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        },
+    );
+
+    match result {
+        Ok((id, title, description, done, parent_id, depend_id, created_at)) => Ok(Task {
+            id,
+            title,
+            description,
+            status: TaskStatus::from_int(done),
+            parent_id,
+            depend_id,
+            created_at: Some(created_at),
+        }),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            bail!("Task '{}' not found.", id);
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Update task description
+pub fn update_task(conn: &Connection, id: &str, description: &str) -> Result<()> {
+    validate_id(id)?;
+
+    let updated = conn.execute(
+        "UPDATE tasks SET description = ?1 WHERE id = ?2",
+        [description, id],
+    )?;
+
+    if updated == 0 {
+        bail!("Task '{}' not found.", id);
+    }
+    Ok(())
+}
+
+/// Start a task (pending -> in_progress)
+pub fn start_task(conn: &Connection, id: &str) -> Result<()> {
+    validate_id(id)?;
+
+    let status: i32 = conn
+        .query_row("SELECT done FROM tasks WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => anyhow::anyhow!("Task '{}' not found.", id),
+            _ => e.into(),
+        })?;
+
+    if status != 0 {
+        if status == 1 {
+            bail!("Task '{}' is already in progress.", id);
+        } else {
+            bail!("Task '{}' is already done.", id);
+        }
+    }
+
+    conn.execute("UPDATE tasks SET done = 1 WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Complete a task
+pub fn complete_task(conn: &Connection, id: &str) -> Result<()> {
+    validate_id(id)?;
+
+    let status: i32 = conn
+        .query_row("SELECT done FROM tasks WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => anyhow::anyhow!("Task '{}' not found.", id),
+            _ => e.into(),
+        })?;
+
+    if status == 2 {
+        bail!("Task '{}' is already done.", id);
+    }
+
+    let depend_id: Option<String> = conn.query_row(
+        "SELECT depend_id FROM tasks WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+
+    if let Some(did) = depend_id {
+        match task_is_done(conn, &did)? {
+            Some(true) => {}
+            Some(false) => bail!("Cannot complete: depends on '{}' which is not done.", did),
+            None => {}
+        }
+    }
+
+    conn.execute("UPDATE tasks SET done = 2 WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Remove a task
+pub fn remove_task(conn: &Connection, id: &str) -> Result<()> {
+    validate_id(id)?;
+
+    if !task_exists(conn, id)? {
+        bail!("Task '{}' not found.", id);
+    }
+
+    let dependents: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE depend_id = ?1 AND done < 2",
+        [id],
+        |row| row.get(0),
+    )?;
+
+    if dependents > 0 {
+        bail!(
+            "Cannot remove: {} active task(s) depend on '{}'.",
+            dependents,
+            id
+        );
+    }
+
+    let children: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE parent_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+
+    if children > 0 {
+        bail!("Cannot remove: {} task(s) have '{}' as parent.", children, id);
+    }
+
+    conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Get task IDs (for completions)
+pub fn get_task_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE done < 2")?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+    let mut result = Vec::new();
+    for id in ids {
+        result.push(id?);
+    }
+    Ok(result)
+}
+
+/// Initialize tsk in current directory (non-interactive, for MCP)
+pub fn init_project() -> Result<PathBuf> {
+    let current_dir = env::current_dir().context("Failed to get current directory")?;
+    let tsk_dir = current_dir.join(".tsk");
+
+    if !tsk_dir.exists() {
+        fs::create_dir_all(&tsk_dir).context("Failed to create .tsk directory")?;
+    }
+
+    let db_path = tsk_dir.join("tsk.sqlite");
+    let conn = Connection::open(&db_path).context("Failed to create database")?;
+    init_db(&conn)?;
+
+    Ok(db_path)
+}
+
+/// Find and open database, returns None if not initialized
+pub fn open_db() -> Result<Option<Connection>> {
+    match find_db_path() {
+        Some(path) => {
+            let conn = Connection::open(&path)?;
+            migrate_db(&conn)?;
+            Ok(Some(conn))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Find and open database, error if not initialized
+pub fn require_db() -> Result<Connection> {
+    match open_db()? {
+        Some(conn) => Ok(conn),
+        None => bail!("Project not initialized. Run 'tsk init' first."),
     }
 }
 
@@ -411,268 +784,83 @@ fn cmd_create(
     parent: Option<&str>,
     depend: Option<&str>,
 ) -> Result<()> {
-    // Validate parent exists
-    if let Some(parent_id) = parent {
-        validate_id(parent_id)?;
-        if !task_exists(conn, parent_id)? {
-            bail!("Parent task '{}' not found.", parent_id);
-        }
-    }
-
-    // Validate dependency exists
-    if let Some(depend_id) = depend {
-        validate_id(depend_id)?;
-        if !task_exists(conn, depend_id)? {
-            bail!("Dependency task '{}' not found.", depend_id);
-        }
-    }
-
-    let id = generate_id(conn)?;
-    conn.execute(
-        "INSERT INTO tasks (id, title, description, parent_id, depend_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![id, title, description, parent, depend],
-    )?;
+    let id = create_task(conn, title, description, parent, depend)?;
     println!("{}", id);
     Ok(())
 }
 
 fn cmd_list(conn: &Connection, inprogress: bool, all: bool, parent: Option<&str>) -> Result<()> {
-    if let Some(pid) = parent {
-        validate_id(pid)?;
-        if !task_exists(conn, pid)? {
-            bail!("Parent task '{}' not found.", pid);
-        }
-    }
-
-    // Determine status filter: all, inprogress (1), or pending (0)
-    let status_filter = if all {
-        None
-    } else if inprogress {
-        Some(1)
-    } else {
-        Some(0)
-    };
-
-    let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (status_filter, parent) {
-        (None, Some(p)) => (
-            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE parent_id = ?1 ORDER BY created_at".to_string(),
-            vec![Box::new(p.to_string()) as Box<dyn rusqlite::ToSql>],
-        ),
-        (Some(status), Some(p)) => (
-            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE done = ?1 AND parent_id = ?2 ORDER BY created_at".to_string(),
-            vec![Box::new(status) as Box<dyn rusqlite::ToSql>, Box::new(p.to_string())],
-        ),
-        (None, None) => (
-            "SELECT id, title, done, parent_id, depend_id FROM tasks ORDER BY created_at".to_string(),
-            vec![],
-        ),
-        (Some(status), None) => (
-            "SELECT id, title, done, parent_id, depend_id FROM tasks WHERE done = ?1 ORDER BY created_at".to_string(),
-            vec![Box::new(status) as Box<dyn rusqlite::ToSql>],
-        ),
-    };
-
-    let mut stmt = conn.prepare(&sql)?;
-    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let tasks = stmt.query_map(params_refs.as_slice(), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i32>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-        ))
-    })?;
+    let tasks = list_tasks(conn, inprogress, all, parent)?;
 
     for task in tasks {
-        let (id, title, done, parent_id, depend_id) = task?;
-        let mark = match done {
-            0 => " ",
-            1 => ">",
-            _ => "x",
-        };
-
         let mut suffix = String::new();
-        if let Some(pid) = parent_id {
+        if let Some(pid) = task.parent_id {
             suffix.push_str(&format!(" ^{}", pid));
         }
-        if let Some(did) = depend_id {
+        if let Some(did) = task.depend_id {
             suffix.push_str(&format!(" @{}", did));
         }
 
-        println!("{}  [{}]  {}{}", id, mark, title, suffix);
+        println!(
+            "{}  [{}]  {}{}",
+            task.id,
+            task.status.marker(),
+            task.title,
+            suffix
+        );
     }
 
     Ok(())
 }
 
 fn cmd_update(conn: &Connection, id: &str, description: &str) -> Result<()> {
-    validate_id(id)?;
-
-    let updated = conn.execute(
-        "UPDATE tasks SET description = ?1 WHERE id = ?2",
-        [description, id],
-    )?;
-
-    if updated == 0 {
-        bail!("Task '{}' not found.", id);
-    }
-
+    update_task(conn, id, description)?;
     println!("Updated: {}", id);
     Ok(())
 }
 
 fn cmd_start(conn: &Connection, id: &str) -> Result<()> {
-    validate_id(id)?;
-
-    // Check if task exists and get current status
-    let status: i32 = conn
-        .query_row("SELECT done FROM tasks WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => anyhow::anyhow!("Task '{}' not found.", id),
-            _ => e.into(),
-        })?;
-
-    if status != 0 {
-        if status == 1 {
-            bail!("Task '{}' is already in progress.", id);
-        } else {
-            bail!("Task '{}' is already done.", id);
-        }
-    }
-
-    conn.execute("UPDATE tasks SET done = 1 WHERE id = ?1", [id])?;
+    start_task(conn, id)?;
     println!("Started: {}", id);
     Ok(())
 }
 
 fn cmd_done(conn: &Connection, id: &str) -> Result<()> {
-    validate_id(id)?;
-
-    // Check if task exists and get current status
-    let status: i32 = conn
-        .query_row("SELECT done FROM tasks WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => anyhow::anyhow!("Task '{}' not found.", id),
-            _ => e.into(),
-        })?;
-
-    if status == 2 {
-        bail!("Task '{}' is already done.", id);
-    }
-
-    // Check if task has unfinished dependency
-    let depend_id: Option<String> = conn.query_row(
-        "SELECT depend_id FROM tasks WHERE id = ?1",
-        [id],
-        |row| row.get(0),
-    )?;
-
-    if let Some(did) = depend_id {
-        match task_is_done(conn, &did)? {
-            Some(true) => {} // dependency is done, OK
-            Some(false) => bail!("Cannot complete: depends on '{}' which is not done.", did),
-            None => {} // dependency was deleted, allow completion
-        }
-    }
-
-    conn.execute("UPDATE tasks SET done = 2 WHERE id = ?1", [id])?;
+    complete_task(conn, id)?;
     println!("Done: {}", id);
     Ok(())
 }
 
 fn cmd_remove(conn: &Connection, id: &str) -> Result<()> {
-    validate_id(id)?;
-
-    if !task_exists(conn, id)? {
-        bail!("Task '{}' not found.", id);
-    }
-
-    // Check if other tasks depend on this one (not done = pending or in_progress)
-    let dependents: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE depend_id = ?1 AND done < 2",
-        [id],
-        |row| row.get(0),
-    )?;
-
-    if dependents > 0 {
-        bail!("Cannot remove: {} active task(s) depend on '{}'.", dependents, id);
-    }
-
-    // Check if this task has children
-    let children: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE parent_id = ?1",
-        [id],
-        |row| row.get(0),
-    )?;
-
-    if children > 0 {
-        bail!("Cannot remove: {} task(s) have '{}' as parent.", children, id);
-    }
-
-    conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+    remove_task(conn, id)?;
     println!("Removed: {}", id);
     Ok(())
 }
 
 fn cmd_show(conn: &Connection, id: &str) -> Result<()> {
-    validate_id(id)?;
+    let task = get_task(conn, id)?;
 
-    let result = conn.query_row(
-        "SELECT id, title, description, done, parent_id, depend_id, created_at FROM tasks WHERE id = ?1",
-        [id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i32>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        },
-    );
-
-    match result {
-        Ok((id, title, description, done, parent_id, depend_id, created_at)) => {
-            let status = match done {
-                0 => "pending",
-                1 => "in progress",
-                _ => "done",
-            };
-            println!("ID:          {}", id);
-            println!("Title:       {}", title);
-            println!("Status:      {}", status);
-            if let Some(pid) = parent_id {
-                println!("Parent:      {}", pid);
-            }
-            if let Some(did) = depend_id {
-                println!("Depends on:  {}", did);
-            }
-            println!("Created:     {}", created_at);
-            println!();
-            println!("{}", description);
-            Ok(())
-        }
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            bail!("Task '{}' not found.", id);
-        }
-        Err(e) => Err(e.into()),
+    println!("ID:          {}", task.id);
+    println!("Title:       {}", task.title);
+    println!("Status:      {}", task.status.as_str());
+    if let Some(pid) = task.parent_id {
+        println!("Parent:      {}", pid);
     }
+    if let Some(did) = task.depend_id {
+        println!("Depends on:  {}", did);
+    }
+    if let Some(created) = task.created_at {
+        println!("Created:     {}", created);
+    }
+    println!();
+    println!("{}", task.description);
+    Ok(())
 }
 
 fn cmd_ids(conn: &Connection) -> Result<()> {
-    // Return pending and in_progress tasks (done < 2)
-    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE done < 2")?;
-    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
-
+    let ids = get_task_ids(conn)?;
     for id in ids {
-        println!("{}", id?);
+        println!("{}", id);
     }
     Ok(())
 }
@@ -691,6 +879,10 @@ fn main() -> Result<()> {
         Some(Commands::Completions { shell }) => {
             cmd_completions(shell);
         }
+        Some(Commands::Mcp) => {
+            // MCP server handles its own DB connection
+            mcp::run_server()?;
+        }
         Some(cmd) => {
             let db_path = find_db_path();
             let Some(db_path) = db_path else {
@@ -707,6 +899,7 @@ fn main() -> Result<()> {
             match cmd {
                 Commands::Init { .. } => unreachable!(),
                 Commands::Completions { .. } => unreachable!(),
+                Commands::Mcp => unreachable!(),
                 Commands::Create {
                     title,
                     description,

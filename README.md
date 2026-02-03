@@ -114,6 +114,54 @@ Supported agents:
 - **Cursor** → `.cursorrules`
 - **Windsurf** → `.windsurfrules`
 
+## MCP Server
+
+tsk includes a built-in MCP (Model Context Protocol) server for direct IDE integration.
+
+```bash
+tsk mcp   # starts MCP server on stdio
+```
+
+### Claude Code
+
+Add to `~/.claude/mcp_servers.json`:
+
+```json
+{
+  "tsk": {
+    "command": "tsk",
+    "args": ["mcp"]
+  }
+}
+```
+
+### VS Code / Cursor
+
+Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "tsk": {
+      "command": "tsk",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `create` | Create a new task |
+| `list` | List tasks (pending by default) |
+| `show` | Show task details |
+| `update` | Update task description |
+| `start` | Start task (pending → in progress) |
+| `done` | Mark task as done |
+| `remove` | Remove a task |
+
 ## Tab completion
 
 Tab completion is installed automatically. Restart terminal after install.
