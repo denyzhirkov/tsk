@@ -50,6 +50,11 @@ download "$LATEST_URL" "$INSTALL_DIR/tsk"
 # Make executable
 chmod +x "$INSTALL_DIR/tsk"
 
+# Remove quarantine attribute on macOS (prevents "killed" error)
+if [ "$OS" = "darwin" ]; then
+    xattr -cr "$INSTALL_DIR/tsk" 2>/dev/null || true
+fi
+
 echo "Installed to $INSTALL_DIR/tsk"
 
 # Create symlink in /usr/local/bin for MCP server compatibility
