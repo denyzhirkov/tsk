@@ -6,6 +6,12 @@ _tsk_task_ids() {
     _describe 'task id' ids
 }
 
+_tsk_memory_ids() {
+    local ids
+    ids=($(tsk m list 2>/dev/null | grep -oE '^\[[a-z0-9]{6}\]' | tr -d '[]'))
+    _describe 'memory id' ids
+}
+
 _tsk() {
     local -a commands
     commands=(
@@ -17,12 +23,14 @@ _tsk() {
         'start:Start working on a task'
         'done:Mark task as done'
         'remove:Remove a task'
+        'm:Store project knowledge (memory)'
         'completions:Generate shell completions'
     )
 
     _arguments -C \
         '-h[Print help]' \
         '--help[Print help]' \
+        '--selfupdate[Update tsk to latest version]' \
         '1:command:->command' \
         '*::args:->args'
 
@@ -55,6 +63,37 @@ _tsk() {
                     ;;
                 completions)
                     _arguments '1:shell:(bash zsh fish powershell elvish)'
+                    ;;
+                m)
+                    local -a m_commands
+                    m_commands=(
+                        'list:List memory entries'
+                        'show:Show memory entry'
+                        'search:Search memories'
+                        'rm:Remove memory entry'
+                    )
+                    _arguments -C \
+                        '-t[Tags]:tags:' \
+                        '--tags=[Tags]:tags:' \
+                        '1:subcommand:->m_cmd' \
+                        '*::args:->m_args'
+                    case $state in
+                        m_cmd)
+                            _describe 'memory command' m_commands
+                            ;;
+                        m_args)
+                            case $words[1] in
+                                show|rm)
+                                    _tsk_memory_ids
+                                    ;;
+                                list)
+                                    _arguments \
+                                        '--tag=[Filter by tag]:tag:' \
+                                        '--last=[Show last N entries]:number:'
+                                    ;;
+                            esac
+                            ;;
+                    esac
                     ;;
             esac
             ;;

@@ -17,6 +17,11 @@ This project follows **Ralph's Loop** and **GSD (Get Shit Done)** principles:
 curl -fsSL https://raw.githubusercontent.com/denyzhirkov/tsk/master/install.sh | sh
 ```
 
+### Update
+
+```bash
+tsk --selfupdate
+```
 
 ## Usage
 
@@ -45,6 +50,21 @@ This creates `.tsk/tsk.sqlite` in the current directory.
 | `tsk start <id>` | Start working on a task (pending → in progress) |
 | `tsk done <id>` | Mark task as done |
 | `tsk remove <id>` | Remove a task |
+
+### Memory (project knowledge)
+
+Store important project information for yourself and AI agents:
+
+| Command | Description |
+|---------|-------------|
+| `tsk m "text"` | Create a memory entry |
+| `tsk m "text" --tags api,auth` | Create with tags |
+| `tsk m list` | List all memories |
+| `tsk m list --tag api` | Filter by tag |
+| `tsk m list --last 5` | Show last 5 entries |
+| `tsk m show <id>` | Show full memory entry |
+| `tsk m search "query"` | Search by content |
+| `tsk m rm <id>` | Remove memory entry |
 
 ### Create options
 
@@ -162,6 +182,7 @@ Add to `.vscode/mcp.json`:
 
 | Tool | Description |
 |------|-------------|
+| `init` | Initialize tsk in current directory |
 | `create` | Create a new task |
 | `list` | List tasks (pending by default) |
 | `show` | Show task details |
@@ -169,6 +190,11 @@ Add to `.vscode/mcp.json`:
 | `start` | Start task (pending → in progress) |
 | `done` | Mark task as done |
 | `remove` | Remove a task |
+| `memory_create` | Create a memory entry |
+| `memory_list` | List memory entries |
+| `memory_show` | Show memory entry |
+| `memory_search` | Search memories |
+| `memory_remove` | Remove memory entry |
 
 ## Tab completion
 

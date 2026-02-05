@@ -3,8 +3,8 @@
 //! Provides JSON-RPC 2.0 interface over stdio for IDE integration.
 
 use crate::{
-    complete_task, create_task, get_task, init_project, list_tasks, open_db, remove_task,
-    start_task, update_task,
+    complete_task, create_memory, create_task, get_memory, get_task, init_project, list_memories,
+    list_tasks, open_db, remove_memory, remove_task, search_memories, start_task, update_task,
 };
 use anyhow::Result;
 use rusqlite::Connection;
@@ -295,6 +295,84 @@ fn get_tools() -> Vec<Tool> {
                 "required": ["id"]
             }),
         },
+        // Memory tools
+        Tool {
+            name: "memory_create".to_string(),
+            description: "Create a memory entry to store project knowledge".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Memory content text"
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": "Tags (comma-separated)"
+                    }
+                },
+                "required": ["content"]
+            }),
+        },
+        Tool {
+            name: "memory_list".to_string(),
+            description: "List memory entries".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string",
+                        "description": "Filter by tag"
+                    },
+                    "last": {
+                        "type": "integer",
+                        "description": "Show only last N entries"
+                    }
+                }
+            }),
+        },
+        Tool {
+            name: "memory_show".to_string(),
+            description: "Show full memory entry".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Memory ID (6 characters)"
+                    }
+                },
+                "required": ["id"]
+            }),
+        },
+        Tool {
+            name: "memory_search".to_string(),
+            description: "Search memories by content".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        Tool {
+            name: "memory_remove".to_string(),
+            description: "Remove a memory entry".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Memory ID (6 characters)"
+                    }
+                },
+                "required": ["id"]
+            }),
+        },
     ]
 }
 
@@ -325,6 +403,12 @@ fn handle_tool_with_db(conn: &Connection, name: &str, args: &Value) -> ToolResul
         "start" => handle_start(conn, args),
         "done" => handle_done(conn, args),
         "remove" => handle_remove(conn, args),
+        // Memory tools
+        "memory_create" => handle_memory_create(conn, args),
+        "memory_list" => handle_memory_list(conn, args),
+        "memory_show" => handle_memory_show(conn, args),
+        "memory_search" => handle_memory_search(conn, args),
+        "memory_remove" => handle_memory_remove(conn, args),
         _ => ToolResult::error(format!("Unknown tool: {}", name)),
     }
 }
@@ -418,6 +502,66 @@ fn handle_remove(conn: &Connection, args: &Value) -> ToolResult {
     };
 
     match remove_task(conn, id) {
+        Ok(()) => ToolResult::json(&json!({ "success": true, "id": id })),
+        Err(e) => ToolResult::error(e.to_string()),
+    }
+}
+
+// ============================================================================
+// Memory Handlers
+// ============================================================================
+
+fn handle_memory_create(conn: &Connection, args: &Value) -> ToolResult {
+    let content = args["content"].as_str().unwrap_or_default();
+    let tags = args["tags"].as_str();
+
+    match create_memory(conn, content, tags) {
+        Ok(id) => ToolResult::json(&json!({ "id": id })),
+        Err(e) => ToolResult::error(e.to_string()),
+    }
+}
+
+fn handle_memory_list(conn: &Connection, args: &Value) -> ToolResult {
+    let tag = args["tag"].as_str();
+    let last = args["last"].as_u64().map(|n| n as usize);
+
+    match list_memories(conn, tag, last) {
+        Ok(memories) => ToolResult::json(&memories),
+        Err(e) => ToolResult::error(e.to_string()),
+    }
+}
+
+fn handle_memory_show(conn: &Connection, args: &Value) -> ToolResult {
+    let id = match args["id"].as_str() {
+        Some(id) => id,
+        None => return ToolResult::error("Missing required parameter: id"),
+    };
+
+    match get_memory(conn, id) {
+        Ok(memory) => ToolResult::json(&memory),
+        Err(e) => ToolResult::error(e.to_string()),
+    }
+}
+
+fn handle_memory_search(conn: &Connection, args: &Value) -> ToolResult {
+    let query = match args["query"].as_str() {
+        Some(q) => q,
+        None => return ToolResult::error("Missing required parameter: query"),
+    };
+
+    match search_memories(conn, query) {
+        Ok(memories) => ToolResult::json(&memories),
+        Err(e) => ToolResult::error(e.to_string()),
+    }
+}
+
+fn handle_memory_remove(conn: &Connection, args: &Value) -> ToolResult {
+    let id = match args["id"].as_str() {
+        Some(id) => id,
+        None => return ToolResult::error("Missing required parameter: id"),
+    };
+
+    match remove_memory(conn, id) {
         Ok(()) => ToolResult::json(&json!({ "success": true, "id": id })),
         Err(e) => ToolResult::error(e.to_string()),
     }

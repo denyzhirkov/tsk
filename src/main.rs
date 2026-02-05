@@ -9,6 +9,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 
 mod mcp;
 
@@ -82,6 +83,17 @@ pub struct TaskSummary {
     pub depend_id: Option<String>,
 }
 
+/// Memory entry for storing project knowledge
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
 #[derive(Parser)]
 #[command(name = "tsk")]
 #[command(about = "Agent-first cli task tracker")]
@@ -95,6 +107,10 @@ Example:
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Update tsk to the latest version from GitHub
+    #[arg(long)]
+    selfupdate: bool,
 }
 
 #[derive(Subcommand)]
@@ -208,6 +224,52 @@ Task must be in pending status to start.")]
     /// Run MCP server for IDE integration
     #[command(hide = true)]
     Mcp,
+    /// Store project knowledge and notes (memory)
+    #[command(after_help = "Examples:
+  tsk m \"API uses JWT tokens\"              # quick create
+  tsk m \"Deploy via CI\" --tags deploy,ci   # with tags
+  tsk m list                                # show all
+  tsk m list --tag api                      # filter by tag
+  tsk m show abc123                         # full details
+  tsk m search \"JWT\"                        # search content
+  tsk m rm abc123                           # remove")]
+    M {
+        #[command(subcommand)]
+        action: Option<MemoryCommands>,
+        /// Quick create: content text
+        content: Option<String>,
+        /// Tags (comma-separated)
+        #[arg(long, short)]
+        tags: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommands {
+    /// List all memory entries
+    List {
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+        /// Show only last N entries
+        #[arg(long)]
+        last: Option<usize>,
+    },
+    /// Show full memory entry
+    Show {
+        /// Memory ID (6 chars)
+        id: String,
+    },
+    /// Search memories by content
+    Search {
+        /// Search query
+        query: String,
+    },
+    /// Remove memory entry
+    Rm {
+        /// Memory ID (6 chars)
+        id: String,
+    },
 }
 
 fn find_db_path() -> Option<PathBuf> {
@@ -220,7 +282,13 @@ fn find_db_path() -> Option<PathBuf> {
     }
 }
 
-fn generate_id(conn: &Connection) -> Result<String> {
+fn id_exists_in_table(conn: &Connection, table: &str, id: &str) -> Result<bool> {
+    let query = format!("SELECT COUNT(*) FROM {} WHERE id = ?1", table);
+    let count: i32 = conn.query_row(&query, [id], |row| row.get(0))?;
+    Ok(count > 0)
+}
+
+fn generate_id(conn: &Connection, table: &str) -> Result<String> {
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::thread_rng();
 
@@ -232,7 +300,7 @@ fn generate_id(conn: &Connection) -> Result<String> {
             })
             .collect();
 
-        if !task_exists(conn, &id)? {
+        if !id_exists_in_table(conn, table, &id)? {
             return Ok(id);
         }
     }
@@ -264,6 +332,15 @@ fn init_db(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            tags TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )",
         [],
     )?;
@@ -308,6 +385,23 @@ fn migrate_db(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE tasks SET done = 2 WHERE done = 1", [])?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )?;
+    }
+
+    // Migration v2: add memories table
+    if schema_version < 2 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                tags TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')",
             [],
         )?;
     }
@@ -364,7 +458,7 @@ pub fn create_task(
         }
     }
 
-    let id = generate_id(conn)?;
+    let id = generate_id(conn, "tasks")?;
     conn.execute(
         "INSERT INTO tasks (id, title, description, parent_id, depend_id) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![id, title, description, parent, depend],
@@ -635,11 +729,129 @@ pub fn require_db() -> Result<Connection> {
     }
 }
 
+// ============================================================================
+// Memory core functions
+// ============================================================================
+
+fn memory_exists(conn: &Connection, id: &str) -> Result<bool> {
+    let count: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Create a new memory entry
+pub fn create_memory(conn: &Connection, content: &str, tags: Option<&str>) -> Result<String> {
+    let id = generate_id(conn, "memories")?;
+
+    conn.execute(
+        "INSERT INTO memories (id, content, tags) VALUES (?1, ?2, ?3)",
+        rusqlite::params![id, content, tags],
+    )?;
+
+    Ok(id)
+}
+
+/// List memory entries
+pub fn list_memories(conn: &Connection, tag: Option<&str>, last: Option<usize>) -> Result<Vec<Memory>> {
+    let mut memories = Vec::new();
+
+    if let Some(t) = tag {
+        let mut stmt = conn.prepare(
+            "SELECT id, content, tags, created_at FROM memories WHERE tags LIKE ?1 ORDER BY created_at DESC"
+        )?;
+        let rows = stmt.query_map([format!("%{}%", t)], |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                tags: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        for mem in rows.flatten() {
+            memories.push(mem);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, content, tags, created_at FROM memories ORDER BY created_at DESC"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                tags: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        for mem in rows.flatten() {
+            memories.push(mem);
+        }
+    }
+
+    if let Some(n) = last {
+        memories.truncate(n);
+    }
+
+    Ok(memories)
+}
+
+/// Get a single memory entry
+pub fn get_memory(conn: &Connection, id: &str) -> Result<Memory> {
+    validate_id(id)?;
+
+    let memory = conn.query_row(
+        "SELECT id, content, tags, created_at FROM memories WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                tags: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        },
+    ).context(format!("Memory '{}' not found.", id))?;
+
+    Ok(memory)
+}
+
+/// Search memories by content
+pub fn search_memories(conn: &Connection, query: &str) -> Result<Vec<Memory>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content, tags, created_at FROM memories WHERE content LIKE ?1 ORDER BY created_at DESC"
+    )?;
+
+    let rows = stmt.query_map([format!("%{}%", query)], |row| {
+        Ok(Memory {
+            id: row.get(0)?,
+            content: row.get(1)?,
+            tags: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Remove a memory entry
+pub fn remove_memory(conn: &Connection, id: &str) -> Result<()> {
+    validate_id(id)?;
+
+    if !memory_exists(conn, id)? {
+        bail!("Memory '{}' not found.", id);
+    }
+
+    conn.execute("DELETE FROM memories WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 const TSK_INSTRUCTIONS: &str = r#"## Task Management
 
 This project uses `tsk` for task tracking.
 
-### Commands
+### Task Commands
 - `tsk create "<title>" "<description>"` — create task, returns ID
 - `tsk create "<title>" "<desc>" --parent <id>` — create subtask
 - `tsk create "<title>" "<desc>" --depend <id>` — task with dependency
@@ -652,9 +864,18 @@ This project uses `tsk` for task tracking.
 - `tsk done <id>` — mark complete
 - `tsk remove <id>` — delete task
 
+### Memory Commands (project knowledge)
+- `tsk m "<text>"` — store important info
+- `tsk m "<text>" --tags api,auth` — store with tags
+- `tsk m list` — show all memories
+- `tsk m list --tag api` — filter by tag
+- `tsk m search "<query>"` — search memories
+- `tsk m show <id>` — show full memory
+- `tsk m rm <id>` — remove memory
+
 ### When to use
-- User asks to track/manage tasks
-- Multi-step work requiring progress tracking
+- Tasks: track multi-step work, user requests task tracking
+- Memory: store project decisions, important context, architecture notes
 
 ### Output format
 `abc123  [ ]  Pending task ^parent @dependency`
@@ -869,8 +1090,175 @@ fn cmd_completions(shell: Shell) {
     generate(shell, &mut Cli::command(), "tsk", &mut io::stdout());
 }
 
+// ============================================================================
+// Memory CLI commands
+// ============================================================================
+
+fn truncate_content(s: &str, max_len: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_len {
+        s.to_string()
+    } else {
+        // First 15 chars + "..." + last 5 chars
+        let first: String = chars.iter().take(15).collect();
+        let last: String = chars.iter().skip(chars.len().saturating_sub(5)).collect();
+        format!("{}...{}", first, last)
+    }
+}
+
+fn cmd_memory_create(conn: &Connection, content: &str, tags: Option<&str>) -> Result<()> {
+    let id = create_memory(conn, content, tags)?;
+    println!("{}", id);
+    Ok(())
+}
+
+fn cmd_memory_list(conn: &Connection, tag: Option<&str>, last: Option<usize>) -> Result<()> {
+    let memories = list_memories(conn, tag, last)?;
+
+    for mem in memories {
+        let content_preview = truncate_content(&mem.content, 50);
+        let tags_str = mem.tags.map(|t| format!(" [{}]", t)).unwrap_or_default();
+        println!("[{}] {}{}", mem.id, content_preview, tags_str);
+    }
+
+    Ok(())
+}
+
+fn cmd_memory_show(conn: &Connection, id: &str) -> Result<()> {
+    let mem = get_memory(conn, id)?;
+
+    println!("ID:      {}", mem.id);
+    if let Some(tags) = mem.tags {
+        println!("Tags:    {}", tags);
+    }
+    if let Some(created) = mem.created_at {
+        println!("Created: {}", created);
+    }
+    println!();
+    println!("{}", mem.content);
+    Ok(())
+}
+
+fn cmd_memory_search(conn: &Connection, query: &str) -> Result<()> {
+    let memories = search_memories(conn, query)?;
+
+    if memories.is_empty() {
+        println!("No matches found.");
+        return Ok(());
+    }
+
+    for mem in memories {
+        let content_preview = truncate_content(&mem.content, 50);
+        let tags_str = mem.tags.map(|t| format!(" [{}]", t)).unwrap_or_default();
+        println!("[{}] {}{}", mem.id, content_preview, tags_str);
+    }
+
+    Ok(())
+}
+
+fn cmd_memory_remove(conn: &Connection, id: &str) -> Result<()> {
+    remove_memory(conn, id)?;
+    println!("Removed: {}", id);
+    Ok(())
+}
+
+const REPO: &str = "denyzhirkov/tsk";
+
+fn cmd_selfupdate() -> Result<()> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    println!("Current version: {}", current_version);
+    println!("Checking for updates...");
+
+    // Get latest version from GitHub API
+    let output = Command::new("curl")
+        .args(["-fsSL", &format!("https://api.github.com/repos/{}/releases/latest", REPO)])
+        .output()
+        .context("Failed to run curl. Is curl installed?")?;
+
+    if !output.status.success() {
+        bail!("Failed to check for updates: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse GitHub API response")?;
+
+    let latest_tag = response["tag_name"]
+        .as_str()
+        .context("No tag_name in response")?;
+
+    // Remove 'v' prefix if present
+    let latest_version = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
+
+    if latest_version == current_version {
+        println!("Already up to date!");
+        return Ok(());
+    }
+
+    println!("New version available: {} -> {}", current_version, latest_version);
+    println!("Downloading...");
+
+    // Detect OS and architecture
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    let os_name = match os {
+        "macos" => "darwin",
+        "linux" => "linux",
+        _ => bail!("Unsupported OS: {}", os),
+    };
+
+    let arch_name = match arch {
+        "x86_64" => "x86_64",
+        "aarch64" => "arm64",
+        _ => bail!("Unsupported architecture: {}", arch),
+    };
+
+    let binary_name = format!("tsk-{}-{}", os_name, arch_name);
+    let download_url = format!(
+        "https://github.com/{}/releases/latest/download/{}",
+        REPO, binary_name
+    );
+
+    // Get current executable path
+    let current_exe = std::env::current_exe()
+        .context("Failed to get current executable path")?;
+
+    // Download to temp file
+    let temp_path = current_exe.with_extension("new");
+
+    let status = Command::new("curl")
+        .args(["-fsSL", &download_url, "-o", temp_path.to_str().unwrap()])
+        .status()
+        .context("Failed to download update")?;
+
+    if !status.success() {
+        bail!("Failed to download update from {}", download_url);
+    }
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&temp_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&temp_path, perms)?;
+    }
+
+    // Replace current executable
+    fs::rename(&temp_path, &current_exe)
+        .context("Failed to replace executable. Try running with sudo.")?;
+
+    println!("Updated to version {}!", latest_version);
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle --selfupdate before subcommands
+    if cli.selfupdate {
+        return cmd_selfupdate();
+    }
 
     match cli.command {
         Some(Commands::Init { rules }) => {
@@ -928,6 +1316,30 @@ fn main() -> Result<()> {
                 }
                 Commands::Ids => {
                     cmd_ids(&conn)?;
+                }
+                Commands::M { action, content, tags } => {
+                    match action {
+                        Some(MemoryCommands::List { tag, last }) => {
+                            cmd_memory_list(&conn, tag.as_deref(), last)?;
+                        }
+                        Some(MemoryCommands::Show { id }) => {
+                            cmd_memory_show(&conn, &id)?;
+                        }
+                        Some(MemoryCommands::Search { query }) => {
+                            cmd_memory_search(&conn, &query)?;
+                        }
+                        Some(MemoryCommands::Rm { id }) => {
+                            cmd_memory_remove(&conn, &id)?;
+                        }
+                        None => {
+                            if let Some(text) = content {
+                                cmd_memory_create(&conn, &text, tags.as_deref())?;
+                            } else {
+                                // Show help for m command
+                                Cli::parse_from(["tsk", "m", "--help"]);
+                            }
+                        }
+                    }
                 }
             }
         }

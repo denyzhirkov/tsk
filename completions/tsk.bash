@@ -2,7 +2,7 @@ _tsk() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="init create list show update start done remove completions"
+    local commands="init create list show update start done remove m completions"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -53,6 +53,28 @@ _tsk() {
         completions)
             if [[ $cword -eq 2 ]]; then
                 COMPREPLY=($(compgen -W "bash zsh fish powershell elvish" -- "$cur"))
+            fi
+            ;;
+        m)
+            if [[ $cword -eq 2 ]]; then
+                if [[ $cur == -* ]]; then
+                    COMPREPLY=($(compgen -W "--tags -t" -- "$cur"))
+                else
+                    COMPREPLY=($(compgen -W "list show search rm" -- "$cur"))
+                fi
+            elif [[ $cword -eq 3 ]]; then
+                local subcmd="${words[2]}"
+                case $subcmd in
+                    show|rm)
+                        local ids=$(tsk m list 2>/dev/null | grep -oE '^\[[a-z0-9]{6}\]' | tr -d '[]')
+                        COMPREPLY=($(compgen -W "$ids" -- "$cur"))
+                        ;;
+                    list)
+                        if [[ $cur == -* ]]; then
+                            COMPREPLY=($(compgen -W "--tag --last" -- "$cur"))
+                        fi
+                        ;;
+                esac
             fi
             ;;
     esac
